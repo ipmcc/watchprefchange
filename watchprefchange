@@ -1,0 +1,149 @@
+#!/usr/bin/python
+
+"""
+A little tool to help you diff MacOS preferences across a GUI operation to help figure out what changed
+and how you might make a defaults write for it.
+"""
+
+import tempfile
+import os
+import sys
+import subprocess
+import argparse
+import time
+import datetime
+
+__author__ = "Ian P. McCullough <ipmcc@pobox.com>"
+__copyright__ = "Copyright 2014%s, Ian P. McCullough" % ("" if 2014 == datetime.date.today().year else
+                                                         "-%d" % datetime.date.today().year)
+__credits__ = ["Ian P. McCullough"]
+__license__ = "BSD"
+__version__ = "1.0"
+__maintainer__ = "Ian P. McCullough"
+__email__ = "ipmcc@pobox.com"
+__status__ = "Development"
+
+# A little utility so we can use the with statement for writing to stdout
+class StdOutOrFile(object):
+    def __init__(self, name="-", mode=None, buffering=None):
+        self.name = name
+        self.mode = mode
+        self.buffering = buffering
+        self.needs_close = False
+        self.fh = None
+
+    def __enter__(self):
+        if self.name is None or len(self.name) == 0 or self.name == "-":
+            self.fh = sys.stdout
+            self.needs_close = False
+        else:
+            self.fh = open(self.name, self.mode or "r", self.buffering or -1)
+            self.needs_close = True
+
+        return self.fh
+
+    # noinspection PyUnusedLocal
+    def __exit__(self, ptype, pvalue, ptraceback):
+        if self.needs_close and self.fh is not None:
+            self.fh.close()
+        self.fh = None
+        self.needs_close = False
+
+
+def doit(out_file=None, difftool=None, extra_args_to_diff=None):
+    if not extra_args_to_diff:
+        extra_args_to_diff = []
+
+    with tempfile.NamedTemporaryFile() as before_file, tempfile.NamedTemporaryFile() as after_file:
+        # read the before state
+        try:
+            subprocess.check_call(["defaults", "read"], stdout=before_file)
+        except subprocess.CalledProcessError:
+            print >> sys.stderr, "Could not read before state of defaults!"
+            raise
+
+        # pause...
+        raw_input("Make your preference change, then press Enter to continue... ")
+
+        # read the after state
+        try:
+            subprocess.check_call(["defaults", "read"], stdout=after_file)
+        except subprocess.CalledProcessError:
+            print >> sys.stderr, "Could not read after state of defaults!"
+            raise
+
+        # flush 'em
+        before_file.flush()
+        after_file.flush()
+
+        # take action...
+        before_file_name = before_file.name
+        after_file_name = after_file.name
+        if out_file:
+            with StdOutOrFile(args.output) as out_file:
+                try:
+                    subprocess.call(["diff", before_file_name, after_file_name] + extra_args_to_diff,
+                                    stdout=out_file, stderr=sys.stderr)
+                except Exception:
+                    print >> sys.stderr, "Could not diff before and after states!"
+                    raise
+
+        if difftool:
+            # find the real difftool
+            if not os.path.exists(difftool):
+                try:
+                    difftool = subprocess.check_output(["/bin/bash", "-c", "which " + difftool])
+                except Exception:
+                    raise
+
+            # Launch it with launch services so we dont have to wait for it to quit
+            try:
+                subprocess.check_call(["/usr/bin/open", "-a", difftool, "--args", before_file_name, after_file_name],
+                                      stdout=sys.stdout,
+                                      stderr=sys.stderr)
+
+                # give it a few seconds to open the files which we will subsequently unlink
+                time.sleep(5)
+
+            except Exception:
+                print >> sys.stderr, "Could not call difftool: %s" % difftool
+                raise
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("-v", "--verbosity", default=0, action="count",
+                        help="Verbose output (i.e. don't swallow exceptions")
+    parser.add_argument("-o", "--output", action="store", default=None,
+                        help="Where to write the diff (defaults to stdout)")
+    parser.add_argument("-t", "--difftool", action="store", default=None,
+                        help="Tool to use to diff before and after states")
+
+    (args, remaining) = parser.parse_known_args(sys.argv[1:])
+
+    # if they don't specify output or difftool, then default to writing to stdout
+    # meaning consequently: if they dont specify output, but do specify difftool, then dont write to stdout.
+    if not args.difftool and not args.output:
+        args.output = "-"
+
+    # make sure we can call the diff tool
+    if args.difftool:
+        difftool_in = args.difftool
+        if not os.path.exists(args.difftool):
+            try:
+                difftool_out = subprocess.check_output(["/bin/bash", "-c", "which " + difftool_in]).rstrip('\n')
+                difftool_out = os.path.realpath(difftool_out)
+                args.difftool = difftool_out
+            except:
+                print >> sys.stderr, "Can't find difftool: %s" % args.difftool
+                if args.verbosity > 0:
+                    raise
+
+    # do the work
+    try:
+        doit(args.output, args.difftool, remaining)
+    except Exception:
+        if args.verbosity > 0:
+            raise
+        exit(1)
